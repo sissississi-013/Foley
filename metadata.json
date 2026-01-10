@@ -1,0 +1,5 @@
+{
+  "name": "Foley - Virtual Sound Studio",
+  "description": "An agentic AI sound studio where a virtual crew (Spotter, Director, Engine) automatically spots, designs, and synchronizes sound effects for video.",
+  "requestFramePermissions": []
+}
