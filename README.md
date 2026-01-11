@@ -1,4 +1,5 @@
 # Foley - AI-Powered Virtual Sound Studio
+<img width="1050" height="600" alt="Beige Elegant Minimalist Nail Art Business Card (1)" src="https://github.com/user-attachments/assets/d166ffff-f85e-4638-9819-0dd107e5ea49" />
 
 Foley is a multi-agent system that automates the traditionally manual process of Foley sound design for video production. By orchestrating specialized AI agents that communicate, delegate tasks, and share context through MongoDB, Foley transforms silent video into professionally sound-designed content in minutes rather than days.
 
@@ -110,7 +111,7 @@ $vectorSearch: {
   limit: 1
 }
 ```
-When the Hybrid Engine needs a sound, it first queries MongoDB using Gemini-generated embeddings. A match above 0.7 similarity score returns cached audio instantly--no generation latency, no API cost.
+When the Hybrid Engine needs a sound, it first queries MongoDB using Gemini-generated embeddings. A match above 0.7 similarity score returns cached audio instantly, no generation latency, no API cost.
 
 **2. Automatic Asset Caching**
 Every generated sound is stored with:
@@ -140,7 +141,6 @@ Traditional agent architectures lose context between steps. MongoDB solves this 
 - **Horizontal Scale:** As sound libraries grow to millions of assets, Atlas scales automatically
 
 ### NVIDIA Ecosystem Integration
-
 The system leverages GPU-accelerated AI throughout:
 
 **Gemini on NVIDIA Infrastructure:**
@@ -148,8 +148,7 @@ The system leverages GPU-accelerated AI throughout:
 - Embedding generation for 20+ events completes in seconds
 - Agent reasoning chains execute with minimal latency
 
-**ElevenLabs on NVIDIA:**
-- Sound synthesis models run on NVIDIA GPUs
+**ElevenLabs:**
 - 3-second audio clips generate in under 2 seconds
 - Batch processing of multiple sounds runs concurrently
 
@@ -243,11 +242,6 @@ No single agent could produce the final output. The Spotter cannot generate audi
 - Collaborative editing with multiple human reviewers
 - Export directly to DAW formats (Pro Tools, Logic Pro)
 
----
-
-## Team
-
-Built for the MongoDB x NVIDIA Hackathon 2025.
 
 ---
 
