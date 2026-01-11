@@ -1,7 +1,8 @@
 export enum AgentRole {
   SPOTTER = 'Spotter',
   DIRECTOR = 'Director',
-  ENGINE = 'Hybrid Engine'
+  ENGINE = 'Hybrid Engine',
+  QC = 'QC Reviewer'
 }
 
 export enum SoundSource {
@@ -22,9 +23,12 @@ export interface SoundEvent {
   description: string;
   layers?: SoundLayers;
   source?: SoundSource;
-  status: 'detected' | 'directing' | 'sourcing' | 'ready';
+  status: 'detected' | 'directing' | 'sourcing' | 'ready' | 'reviewing' | 'rejected';
   confidence: number;
   audioUrl?: string; // URL to the generated/retrieved audio file
+  qcFeedback?: string; // Feedback from QC reviewer if rejected
+  regenerationCount?: number; // How many times this sound was regenerated
+  userFeedback?: string; // Manual feedback from user for regeneration
 }
 
 export interface LogEntry {
@@ -35,4 +39,4 @@ export interface LogEntry {
   type: 'info' | 'success' | 'process';
 }
 
-export type ProcessingState = 'idle' | 'uploading' | 'analyzing' | 'directing' | 'generating' | 'complete';
+export type ProcessingState = 'idle' | 'uploading' | 'analyzing' | 'directing' | 'generating' | 'reviewing' | 'complete';

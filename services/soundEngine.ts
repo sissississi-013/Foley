@@ -1,4 +1,4 @@
-import { SoundEvent, SoundSource } from '../types';
+import { SoundSource } from '../types';
 import { getTextEmbedding } from './geminiService';
 
 interface EngineResult {
@@ -7,74 +7,109 @@ interface EngineResult {
   log: string;
 }
 
+// API base URL for our MongoDB backend
+const API_URL = 'http://localhost:3001/api';
+
+/**
+ * Convert a Blob to a base64 data URL
+ */
+const blobToDataUrl = (blob: Blob): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+};
+
+/**
+ * Search MongoDB for similar sounds via our backend API
+ */
+const searchMongoDB = async (embedding: number[], query: string): Promise<{
+  audioData?: string;
+  description?: string;
+  score?: number;
+} | null> => {
+  try {
+    const response = await fetch(`${API_URL}/sounds/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ embedding, query, limit: 1 })
+    });
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    const match = data.documents?.[0];
+
+    if (match && match.score > 0.7 && match.audioData) {
+      return match;
+    }
+    return null;
+  } catch (e) {
+    console.warn('MongoDB search failed:', e);
+    return null;
+  }
+};
+
+/**
+ * Cache a generated sound to MongoDB via our backend API
+ */
+const cacheToMongoDB = async (
+  description: string,
+  query: string,
+  audioData: string,
+  embedding: number[]
+): Promise<boolean> => {
+  try {
+    const response = await fetch(`${API_URL}/sounds/cache`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description, query, audioData, embedding })
+    });
+
+    const result = await response.json();
+    return result.success;
+  } catch (e) {
+    console.warn('Failed to cache sound:', e);
+    return false;
+  }
+};
+
 /**
  * THE HYBRID ENGINE
- * 
+ *
  * Step 1: Checks MongoDB Atlas (Vector Search) for existing assets.
- * Step 2: Checks ElevenLabs (GenAI) to create new assets.
+ * Step 2: Generates via ElevenLabs and CACHES to MongoDB.
  * Step 3: Fallback to Simulation for demo purposes.
  */
 export const produceSoundAsset = async (
-  description: string, 
+  description: string,
   vibe: string
 ): Promise<EngineResult> => {
-  
+
   // Combine description and vibe for the search/prompt
   const query = `${description} ${vibe} sound effect`;
+
+  // Generate embedding once - used for both search and caching
+  let embedding: number[] | null = null;
 
   // ---------------------------------------------------------
   // 1. MONGODB ATLAS VECTOR SEARCH
   // ---------------------------------------------------------
   try {
-    if (process.env.MONGODB_API_KEY && process.env.MONGODB_ENDPOINT) {
-      // Generate Embedding using Gemini
-      const vector = await getTextEmbedding(query);
-      
-      if (vector) {
-        // Call MongoDB Atlas Data API
-        const response = await fetch(`${process.env.MONGODB_ENDPOINT}/action/aggregate`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'api-key': process.env.MONGODB_API_KEY,
-          },
-          body: JSON.stringify({
-            dataSource: "Cluster0",
-            database: "sound_library",
-            collection: "assets",
-            pipeline: [
-              {
-                "$vectorSearch": {
-                  "index": "vector_index",
-                  "path": "embedding",
-                  "queryVector": vector,
-                  "numCandidates": 10,
-                  "limit": 1
-                }
-              },
-              {
-                "$project": {
-                  "_id": 0,
-                  "url": 1,
-                  "description": 1,
-                  "score": { "$meta": "vectorSearchScore" }
-                }
-              }
-            ]
-          })
-        });
+    // Generate Embedding using Gemini
+    embedding = await getTextEmbedding(query);
 
-        const data = await response.json();
-        const match = data.documents?.[0];
+    if (embedding) {
+      const match = await searchMongoDB(embedding, query);
 
-        // Threshold check (e.g., 0.85 similarity)
-        if (match && match.score > 0.85) {
-          return {
-            source: SoundSource.MONGODB,
-            audioUrl: match.url,
-            log: `Found high-confidence match in Atlas (Score: ${match.score.toFixed(2)})`
-          };
-        }
+      if (match) {
+        return {
+          source: SoundSource.MONGODB,
+          audioUrl: match.audioData!,
+          log: `⚡ Cache hit! Found "${match.description}" (Score: ${match.score?.toFixed(2)})`
+        };
       }
     }
   } catch (e) {
@@ -82,7 +117,7 @@ export const produceSoundAsset = async (
   }
 
   // ---------------------------------------------------------
-  // 2. ELEVENLABS GENERATION
+  // 2. ELEVENLABS GENERATION + AUTO-CACHE
   // ---------------------------------------------------------
   try {
     if (process.env.ELEVENLABS_API_KEY) {
@@ -94,21 +129,32 @@ export const produceSoundAsset = async (
         },
         body: JSON.stringify({
           text: query,
-          duration_seconds: 2.0, // Short SFX
-          prompt_influence: 0.5
+          model_id: 'eleven_text_to_sound_v2',
+          duration_seconds: 3.0,
+          prompt_influence: 0.4
         })
       });
 
       if (response.ok) {
         const blob = await response.blob();
-        const audioUrl = URL.createObjectURL(blob);
+        const audioDataUrl = await blobToDataUrl(blob);
+
+        // Cache to MongoDB for future use (non-blocking)
+        if (embedding) {
+          cacheToMongoDB(description, query, audioDataUrl, embedding)
+            .then(success => {
+              if (success) console.log(`✓ Cached "${description}" to MongoDB`);
+            });
+        }
+
         return {
           source: SoundSource.ELEVENLABS,
-          audioUrl: audioUrl,
-          log: `Generated new asset via ElevenLabs: "${query}"`
+          audioUrl: audioDataUrl,
+          log: `🎵 Generated & cached: "${description}"`
         };
       } else {
-        console.warn("ElevenLabs API Error", await response.text());
+        const errorText = await response.text();
+        console.warn("ElevenLabs API Error:", response.status, errorText);
       }
     }
   } catch (e) {
@@ -118,17 +164,15 @@ export const produceSoundAsset = async (
   // ---------------------------------------------------------
   // 3. FALLBACK SIMULATION (For Demo/MVP)
   // ---------------------------------------------------------
-  // If no API keys are present, we simulate the logic to keep the UI functional.
   await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
-  
-  // Randomly assign a "Source" to show how the UI would look
+
   const isSimulatedMongo = Math.random() > 0.6;
-  
+
   return {
     source: isSimulatedMongo ? SoundSource.MONGODB : SoundSource.ELEVENLABS,
-    audioUrl: 'placeholder', // App.tsx handles this by playing a beep
-    log: isSimulatedMongo 
-      ? `(SIM) Match found in MongoDB Atlas.` 
+    audioUrl: 'placeholder',
+    log: isSimulatedMongo
+      ? `(SIM) Match found in MongoDB Atlas.`
       : `(SIM) Generated custom SFX via ElevenLabs.`
   };
 };

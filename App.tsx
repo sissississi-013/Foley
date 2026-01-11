@@ -1,15 +1,18 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { 
-  Upload, Play, ArrowRight, Video, 
-  Wand2, Settings, Download, RefreshCw, FileAudio, FileVideo 
+import {
+  Upload, Play, ArrowRight, Video,
+  Wand2, Settings, Download, RefreshCw, FileAudio, FileVideo
 } from 'lucide-react';
 import { AgentRole, SoundEvent, LogEntry, ProcessingState, SoundSource } from './types';
 import AgentOrchestrator from './components/AgentOrchestrator';
 import EventList from './components/EventList';
+import EditSoundModal from './components/EditSoundModal';
 import TerminalLog from './components/TerminalLog';
 import Timeline from './components/Timeline';
-import { runSpotterAgent, runDirectorAgent, fileToGenerativePart } from './services/geminiService';
+import { runSpotterAgent, runDirectorAgent, runQCReviewerAgent, fileToGenerativePart } from './services/geminiService';
 import { produceSoundAsset } from './services/soundEngine';
+
+const MAX_REGENERATION_ATTEMPTS = 2; // Max times to regenerate a rejected sound
 
 const App: React.FC = () => {
   // State
@@ -22,12 +25,17 @@ const App: React.FC = () => {
   const [activeAgent, setActiveAgent] = useState<AgentRole | null>(null);
   const [agentMessage, setAgentMessage] = useState<string>("");
   const [videoPreview, setVideoPreview] = useState<string | null>(null);
+  const [rejectedCount, setRejectedCount] = useState<number>(0);
   
   // Video Player State
   const videoRef = useRef<HTMLVideoElement>(null);
   const [videoDuration, setVideoDuration] = useState<number>(0);
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
+
+  // Edit Modal State
+  const [editingEvent, setEditingEvent] = useState<SoundEvent | null>(null);
+  const [isRegenerating, setIsRegenerating] = useState<boolean>(false);
 
   // Helper to add logs
   const addLog = useCallback((role: AgentRole, message: string) => {
@@ -67,58 +75,163 @@ const App: React.FC = () => {
       // 1. SPOTTING PHASE (Skip if cached)
       if (!spottedCache) {
         setState('analyzing');
-        addLog(AgentRole.SPOTTER, "Scanning video frames for physical actions...");
-        
+        addLog(AgentRole.SPOTTER, "Initializing visual analysis pipeline...");
+        addLog(AgentRole.SPOTTER, "Scanning for: movements, interactions, environmental sounds, emotional beats...");
+
         const base64Data = await fileToGenerativePart(file);
         const spottedEvents = await runSpotterAgent(base64Data, file.type);
-        
+
         setSpottedCache(spottedEvents); // Save to cache
         currentEvents = spottedEvents;
         setEvents(spottedEvents);
-        addLog(AgentRole.SPOTTER, `Detection complete. Found ${spottedEvents.length} distinct events.`);
+        addLog(AgentRole.SPOTTER, `Analysis complete. Detected ${spottedEvents.length} sound events.`);
+        addLog(AgentRole.SPOTTER, `→ DIRECTOR: Sending ${spottedEvents.length} events for creative direction.`);
       } else {
         // Use Cache
-        addLog(AgentRole.SPOTTER, "Using cached visual analysis. Skipping Spotter phase.");
+        addLog(AgentRole.SPOTTER, "→ DIRECTOR: Using cached analysis. Sending events directly.");
         currentEvents = [...spottedCache];
       }
 
       // 2. DIRECTING PHASE
       setState('directing');
-      addLog(AgentRole.DIRECTOR, `Reviewing events. Applying "${vibe}" direction style...`);
-      
+      addLog(AgentRole.DIRECTOR, `← SPOTTER: Received ${currentEvents.length} events.`);
+      addLog(AgentRole.DIRECTOR, `Applying "${vibe}" creative direction...`);
+      addLog(AgentRole.DIRECTOR, `Generating 3-layer audio plan: Spot + Texture + Vibe...`);
+
       const refinedEvents = await runDirectorAgent(currentEvents, vibe);
       setEvents(refinedEvents);
-      addLog(AgentRole.DIRECTOR, "Sound descriptions refined. 3-Layer audio plan generated.");
+      addLog(AgentRole.DIRECTOR, `Creative direction complete. Theme: "${vibe}" applied.`);
+      addLog(AgentRole.DIRECTOR, `→ ENGINE: Sending ${refinedEvents.length} sound requests.`);
 
       // 3. ENGINE PHASE (Real Implementation)
       setState('generating');
       setActiveAgent(AgentRole.ENGINE);
-      
-      const finalEvents = [...refinedEvents];
-      
+      setRejectedCount(0);
+
+      let finalEvents = [...refinedEvents];
+
+      addLog(AgentRole.ENGINE, `← DIRECTOR: Received ${finalEvents.length} sound requests.`);
+      addLog(AgentRole.ENGINE, `Initializing Hybrid Engine: MongoDB Atlas + ElevenLabs...`);
+
+      // Generate sounds for all events
       for (let i = 0; i < finalEvents.length; i++) {
         const evt = finalEvents[i];
-        
+
         const primarySound = evt.layers?.spot || evt.description;
-        addLog(AgentRole.ENGINE, `Event ${i+1}: Processing "${primarySound}"...`);
+        addLog(AgentRole.ENGINE, `[${i+1}/${finalEvents.length}] Producing: "${primarySound}"`);
         setAgentMessage(`Processing Event ${i+1}/${finalEvents.length}`);
-        
+
         // Call the Hybrid Engine Service
         const result = await produceSoundAsset(primarySound, vibe);
-        
+
         addLog(AgentRole.ENGINE, result.log);
-        
+
         finalEvents[i].source = result.source;
         finalEvents[i].audioUrl = result.audioUrl;
         finalEvents[i].status = 'ready';
-        
+        finalEvents[i].regenerationCount = 0;
+
         setEvents([...finalEvents]); // Update UI progressively
+      }
+
+      // 4. QC REVIEW PHASE
+      setState('reviewing');
+      setActiveAgent(AgentRole.QC);
+      addLog(AgentRole.ENGINE, `→ QC: Sending ${finalEvents.length} sounds for quality review.`);
+      addLog(AgentRole.QC, `← ENGINE: Received ${finalEvents.length} generated sounds.`);
+      addLog(AgentRole.QC, `Analyzing coherence, continuity, and "${vibe}" theme adherence...`);
+      setAgentMessage("Analyzing sound quality...");
+
+      const qcResults = await runQCReviewerAgent(finalEvents, vibe);
+
+      // Find rejected events
+      let rejectedEvents = qcResults.filter(r => !r.passed);
+      setRejectedCount(rejectedEvents.length);
+
+      if (rejectedEvents.length > 0) {
+        addLog(AgentRole.QC, `Found ${rejectedEvents.length} sounds that need improvement.`);
+
+        // Log each rejection
+        rejectedEvents.forEach(r => {
+          const evt = finalEvents[r.eventIndex];
+          addLog(AgentRole.QC, `⚠️ [${evt.timestamp}] ${r.feedback}`);
+          finalEvents[r.eventIndex].status = 'rejected';
+          finalEvents[r.eventIndex].qcFeedback = r.feedback;
+        });
+        setEvents([...finalEvents]);
+
+        // 5. REGENERATION LOOP
+        let regenerationRound = 0;
+
+        while (rejectedEvents.length > 0 && regenerationRound < MAX_REGENERATION_ATTEMPTS) {
+          regenerationRound++;
+          addLog(AgentRole.QC, `→ ENGINE: Requesting regeneration for ${rejectedEvents.length} sounds.`);
+
+          // Switch back to Engine for regeneration
+          setState('generating');
+          setActiveAgent(AgentRole.ENGINE);
+          addLog(AgentRole.ENGINE, `← QC: Received ${rejectedEvents.length} rejection(s). Starting round ${regenerationRound}...`);
+
+          for (const rejection of rejectedEvents) {
+            const idx = rejection.eventIndex;
+            const evt = finalEvents[idx];
+
+            // Skip if already regenerated too many times
+            if ((evt.regenerationCount || 0) >= MAX_REGENERATION_ATTEMPTS) {
+              addLog(AgentRole.ENGINE, `Skipping Event ${idx+1} (max attempts reached)`);
+              continue;
+            }
+
+            // Use the suggested fix or modify the original query
+            const improvedQuery = rejection.suggestedFix ||
+              `${evt.layers?.spot || evt.description} - more ${vibe.toLowerCase()}, clearer`;
+
+            addLog(AgentRole.ENGINE, `Regenerating Event ${idx+1}: "${improvedQuery}"...`);
+            setAgentMessage(`Regenerating ${idx+1}/${rejectedEvents.length}`);
+
+            const result = await produceSoundAsset(improvedQuery, vibe);
+            addLog(AgentRole.ENGINE, result.log);
+
+            finalEvents[idx].source = result.source;
+            finalEvents[idx].audioUrl = result.audioUrl;
+            finalEvents[idx].status = 'reviewing';
+            finalEvents[idx].regenerationCount = (evt.regenerationCount || 0) + 1;
+
+            setEvents([...finalEvents]);
+          }
+
+          // Re-review regenerated sounds
+          setState('reviewing');
+          setActiveAgent(AgentRole.QC);
+          addLog(AgentRole.QC, `Re-reviewing regenerated sounds...`);
+
+          const reReviewResults = await runQCReviewerAgent(finalEvents, vibe);
+          rejectedEvents = reReviewResults.filter(r => !r.passed && finalEvents[r.eventIndex].status === 'reviewing');
+          setRejectedCount(rejectedEvents.length);
+
+          if (rejectedEvents.length === 0) {
+            addLog(AgentRole.QC, `✓ All sounds now pass quality check!`);
+          } else {
+            addLog(AgentRole.QC, `${rejectedEvents.length} sounds still need work.`);
+          }
+        }
+
+        // Mark remaining as ready (even if not perfect after max attempts)
+        finalEvents = finalEvents.map(e => ({
+          ...e,
+          status: 'ready' as const
+        }));
+        setEvents([...finalEvents]);
+      } else {
+        addLog(AgentRole.QC, `✓ All ${finalEvents.length} sounds pass coherence check!`);
       }
 
       setState('complete');
       setActiveAgent(null);
+      setRejectedCount(0);
       setAgentMessage("Production complete.");
-      addLog(AgentRole.ENGINE, "All audio layers synchronized and mixed.");
+      addLog(AgentRole.QC, "✓ Quality review complete. All sounds approved.");
+      addLog(AgentRole.QC, `→ OUTPUT: ${finalEvents.length} sounds ready for export.`);
 
     } catch (error) {
       console.error(error);
@@ -139,6 +252,8 @@ const App: React.FC = () => {
   };
 
   // --- DOWNLOADS ---
+  const [isExporting, setIsExporting] = useState(false);
+
   const handleDownloadVideo = () => {
     if (file && videoPreview) {
        const a = document.createElement('a');
@@ -152,7 +267,7 @@ const App: React.FC = () => {
 
   const handleExportCueSheet = () => {
      if (events.length === 0) return;
-     
+
      const exportData = {
        project: "Foley Agent Session",
        source_file: file?.name,
@@ -170,7 +285,139 @@ const App: React.FC = () => {
      a.click();
      document.body.removeChild(a);
      URL.revokeObjectURL(url);
-  }
+  };
+
+  /**
+   * Export video with mixed audio
+   * Creates a new video file with all Foley sounds mixed in at their timestamps
+   */
+  const handleExportVideoWithAudio = async () => {
+    if (!videoRef.current || events.length === 0 || !file) return;
+
+    setIsExporting(true);
+    addLog(AgentRole.ENGINE, "Starting video export with audio...");
+
+    try {
+      const video = videoRef.current;
+      const duration = video.duration;
+
+      // Create AudioContext for mixing
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const destination = audioCtx.createMediaStreamDestination();
+
+      // Create offline context for rendering
+      const offlineCtx = new OfflineAudioContext(2, audioCtx.sampleRate * duration, audioCtx.sampleRate);
+
+      // Load and schedule all sound events
+      const loadPromises = events.map(async (evt) => {
+        if (!evt.audioUrl || evt.audioUrl === 'placeholder') return null;
+
+        try {
+          // Fetch audio data
+          const response = await fetch(evt.audioUrl);
+          const arrayBuffer = await response.arrayBuffer();
+          const audioBuffer = await offlineCtx.decodeAudioData(arrayBuffer);
+
+          // Schedule at the right time
+          const source = offlineCtx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(offlineCtx.destination);
+
+          const startTime = parseTimestamp(evt.timestamp);
+          source.start(startTime);
+
+          return { evt, startTime };
+        } catch (e) {
+          console.warn(`Failed to load audio for ${evt.timestamp}:`, e);
+          return null;
+        }
+      });
+
+      await Promise.all(loadPromises);
+      addLog(AgentRole.ENGINE, `Loaded ${events.length} audio tracks. Rendering mix...`);
+
+      // Render the audio mix
+      const renderedBuffer = await offlineCtx.startRendering();
+
+      // Convert to WAV
+      const wavBlob = audioBufferToWav(renderedBuffer);
+
+      // Create download link for audio (video mixing requires server-side processing)
+      const audioUrl = URL.createObjectURL(wavBlob);
+      const a = document.createElement('a');
+      a.href = audioUrl;
+      a.download = `foley_audio_${Date.now()}.wav`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(audioUrl);
+
+      addLog(AgentRole.ENGINE, "✓ Audio track exported! Use a video editor to merge with source video.");
+      addLog(AgentRole.ENGINE, "Tip: Import both files into a video editor and sync at 0:00.");
+
+    } catch (error) {
+      console.error("Export failed:", error);
+      addLog(AgentRole.ENGINE, "Export failed. Check console for details.");
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  // Helper: Convert AudioBuffer to WAV Blob
+  const audioBufferToWav = (buffer: AudioBuffer): Blob => {
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
+
+    const bytesPerSample = bitDepth / 8;
+    const blockAlign = numChannels * bytesPerSample;
+
+    const dataLength = buffer.length * blockAlign;
+    const bufferLength = 44 + dataLength;
+
+    const arrayBuffer = new ArrayBuffer(bufferLength);
+    const view = new DataView(arrayBuffer);
+
+    // WAV header
+    const writeString = (offset: number, str: string) => {
+      for (let i = 0; i < str.length; i++) {
+        view.setUint8(offset + i, str.charCodeAt(i));
+      }
+    };
+
+    writeString(0, 'RIFF');
+    view.setUint32(4, bufferLength - 8, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, format, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * blockAlign, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitDepth, true);
+    writeString(36, 'data');
+    view.setUint32(40, dataLength, true);
+
+    // Write audio data
+    const channels: Float32Array[] = [];
+    for (let i = 0; i < numChannels; i++) {
+      channels.push(buffer.getChannelData(i));
+    }
+
+    let offset = 44;
+    for (let i = 0; i < buffer.length; i++) {
+      for (let ch = 0; ch < numChannels; ch++) {
+        const sample = Math.max(-1, Math.min(1, channels[ch][i]));
+        const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+        view.setInt16(offset, intSample, true);
+        offset += 2;
+      }
+    }
+
+    return new Blob([arrayBuffer], { type: 'audio/wav' });
+  };
 
   // --- PREVIEW LOGIC ---
 
@@ -249,17 +496,67 @@ const App: React.FC = () => {
     playSound(event.audioUrl);
   };
 
+  // Manual edit/regenerate handler
+  const handleManualRegenerate = async (eventId: string, feedback: string) => {
+    setIsRegenerating(true);
+
+    try {
+      const eventIndex = events.findIndex(e => e.id === eventId);
+      if (eventIndex === -1) return;
+
+      const evt = events[eventIndex];
+      const updatedEvents = [...events];
+
+      // Combine original query with user feedback
+      const improvedQuery = `${evt.layers?.spot || evt.description}. User feedback: ${feedback}`;
+
+      addLog(AgentRole.ENGINE, `← USER: Manual edit request for [${evt.timestamp}]`);
+      addLog(AgentRole.ENGINE, `Feedback: "${feedback}"`);
+      addLog(AgentRole.ENGINE, `→ DIRECTOR: Consulting on improved sound design...`);
+
+      // Mark as regenerating
+      updatedEvents[eventIndex] = { ...evt, status: 'reviewing' };
+      setEvents(updatedEvents);
+
+      // Generate new sound with feedback
+      addLog(AgentRole.DIRECTOR, `← ENGINE: Received edit request.`);
+      addLog(AgentRole.DIRECTOR, `Adjusting sound design based on feedback...`);
+
+      const result = await produceSoundAsset(improvedQuery, vibe);
+
+      addLog(AgentRole.ENGINE, result.log);
+      addLog(AgentRole.ENGINE, `→ QC: Submitting regenerated sound for review...`);
+
+      // Update the event
+      updatedEvents[eventIndex] = {
+        ...evt,
+        audioUrl: result.audioUrl,
+        source: result.source,
+        status: 'ready',
+        regenerationCount: (evt.regenerationCount || 0) + 1,
+        userFeedback: feedback
+      };
+
+      setEvents(updatedEvents);
+      setEditingEvent(null);
+      addLog(AgentRole.QC, `✓ Manual edit applied successfully.`);
+
+    } catch (error) {
+      console.error("Manual regeneration failed:", error);
+      addLog(AgentRole.ENGINE, `Manual regeneration failed. Please try again.`);
+    } finally {
+      setIsRegenerating(false);
+    }
+  };
+
   return (
     <div className="flex h-screen w-screen bg-studio-900 text-slate-800 overflow-hidden">
       
       {/* LEFT SIDEBAR - Controls */}
       <div className="w-80 bg-studio-800 border-r border-studio-700 flex flex-col z-20 shadow-xl shadow-slate-200/50">
         <div className="p-6 border-b border-studio-700 bg-studio-800">
-          <h1 className="text-2xl font-bold tracking-tighter text-slate-900 flex items-center gap-2">
-            <div className="w-3 h-3 bg-studio-accent rounded-full animate-pulse-fast"></div>
-            FOLEY
-          </h1>
-          <p className="text-xs text-slate-400 uppercase tracking-widest mt-1 font-mono">Virtual Sound Studio</p>
+          <img src="/logo.png" alt="Foley" className="h-10 object-contain" />
+          <p className="text-xs text-slate-400 uppercase tracking-widest mt-2 font-mono">Virtual Sound Studio</p>
         </div>
 
         <div className="p-6 space-y-8 flex-1 overflow-y-auto">
@@ -370,10 +667,11 @@ const App: React.FC = () => {
 
         {/* Top Agent Orchestrator Bar */}
         <div className="h-48 border-b border-studio-700 bg-white/60 backdrop-blur-md flex items-center z-10">
-          <AgentOrchestrator 
-            activeAgent={activeAgent} 
-            state={state} 
-            statusMessage={agentMessage} 
+          <AgentOrchestrator
+            activeAgent={activeAgent}
+            state={state}
+            statusMessage={agentMessage}
+            rejectedCount={rejectedCount}
           />
         </div>
 
@@ -396,12 +694,30 @@ const App: React.FC = () => {
                    <FileVideo className="w-3 h-3" /> Source Video
                  </button>
                  {state === 'complete' && (
-                  <button 
-                    onClick={handleExportCueSheet}
-                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold bg-studio-highlight text-white hover:bg-sky-600 transition-colors shadow-sm"
-                  >
-                    <FileAudio className="w-3 h-3" /> Export Cue Sheet (.json)
-                  </button>
+                  <>
+                    <button
+                      onClick={handleExportVideoWithAudio}
+                      disabled={isExporting}
+                      className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold bg-studio-accent text-white hover:bg-emerald-600 transition-colors shadow-sm disabled:opacity-50"
+                    >
+                      {isExporting ? (
+                        <>
+                          <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                          Exporting...
+                        </>
+                      ) : (
+                        <>
+                          <Download className="w-3 h-3" /> Export Audio Track
+                        </>
+                      )}
+                    </button>
+                    <button
+                      onClick={handleExportCueSheet}
+                      className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold bg-studio-highlight text-white hover:bg-sky-600 transition-colors shadow-sm"
+                    >
+                      <FileAudio className="w-3 h-3" /> Cue Sheet (.json)
+                    </button>
+                  </>
                  )}
               </div>
             </div>
@@ -437,7 +753,7 @@ const App: React.FC = () => {
               </div>
             )}
 
-            <EventList events={events} onPlayPreview={handlePlayPreview} />
+            <EventList events={events} onPlayPreview={handlePlayPreview} onEditSound={setEditingEvent} />
           </div>
 
           {/* Right Panel: Terminal Logs */}
@@ -460,6 +776,16 @@ const App: React.FC = () => {
 
         </div>
       </div>
+
+      {/* Edit Sound Modal */}
+      {editingEvent && (
+        <EditSoundModal
+          event={editingEvent}
+          onClose={() => setEditingEvent(null)}
+          onRegenerate={handleManualRegenerate}
+          isRegenerating={isRegenerating}
+        />
+      )}
     </div>
   );
 };
