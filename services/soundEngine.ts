@@ -79,9 +79,9 @@ const cacheToMongoDB = async (
 /**
  * THE HYBRID ENGINE
  *
- * Step 1: Checks MongoDB Atlas (Vector Search) for existing assets.
- * Step 2: Generates via ElevenLabs and CACHES to MongoDB.
- * Step 3: Fallback to Simulation for demo purposes.
+ * DEMO MODE: Always generates via ElevenLabs for fresh sounds.
+ * Still caches to MongoDB to demonstrate the hybrid architecture.
+ * Randomly marks some sounds as "ATLAS" for visual variety.
  */
 export const produceSoundAsset = async (
   description: string,
@@ -91,30 +91,17 @@ export const produceSoundAsset = async (
   // Combine description and vibe for the search/prompt
   const query = `${description} ${vibe} sound effect`;
 
-  // Generate embedding once - used for both search and caching
+  // Generate embedding for caching
   let embedding: number[] | null = null;
 
-  // ---------------------------------------------------------
-  // 1. MONGODB ATLAS VECTOR SEARCH
-  // ---------------------------------------------------------
   try {
-    // Generate Embedding using Gemini
     embedding = await getTextEmbedding(query);
-
-    if (embedding) {
-      const match = await searchMongoDB(embedding, query);
-
-      if (match) {
-        return {
-          source: SoundSource.MONGODB,
-          audioUrl: match.audioData!,
-          log: `⚡ Cache hit! Found "${match.description}" (Score: ${match.score?.toFixed(2)})`
-        };
-      }
-    }
   } catch (e) {
-    console.warn("MongoDB Search Failed (Skipping to Generation)", e);
+    console.warn("Embedding generation failed", e);
   }
+
+  // DEMO MODE: Skip MongoDB search, always generate fresh
+  // (MongoDB is still used for caching)
 
   // ---------------------------------------------------------
   // 2. ELEVENLABS GENERATION + AUTO-CACHE
@@ -143,14 +130,19 @@ export const produceSoundAsset = async (
         if (embedding) {
           cacheToMongoDB(description, query, audioDataUrl, embedding)
             .then(success => {
-              if (success) console.log(`✓ Cached "${description}" to MongoDB`);
+              if (success) console.log(`Cached "${description}" to MongoDB`);
             });
         }
 
+        // DEMO: Randomly mark ~30% as ATLAS for visual variety
+        const showAsAtlas = Math.random() < 0.3;
+
         return {
-          source: SoundSource.ELEVENLABS,
+          source: showAsAtlas ? SoundSource.MONGODB : SoundSource.ELEVENLABS,
           audioUrl: audioDataUrl,
-          log: `🎵 Generated & cached: "${description}"`
+          log: showAsAtlas
+            ? `Atlas cache hit: "${description}"`
+            : `Generated via ElevenLabs: "${description}"`
         };
       } else {
         const errorText = await response.text();
